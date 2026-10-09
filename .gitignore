@@ -73,3 +73,5 @@ Testing/
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+.vscode/platformio.ini
+.vscode/compile_commands.json
