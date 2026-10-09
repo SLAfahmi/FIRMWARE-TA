@@ -75,3 +75,8 @@ Testing/
 .vscode/ipch
 .vscode/platformio.ini
 .vscode/compile_commands.json
+
+# Project-specific files
+*.md
+*[Pp][Ll][Aa][Nn]*
+/platformio.ini
