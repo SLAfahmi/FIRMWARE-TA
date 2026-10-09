@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../HOSTING_SMART_NURSERY_firmware_copy"
+		},
+		{
+			"name": "FIRMWARE_TA",
+			"path": "."
+		}
+	],
+	"settings": {}
+}

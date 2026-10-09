@@ -1,0 +1,158 @@
+# Implementation Plan: Sistem Smart Nursery Modular (1 Board ESP32-S3, 3 Pin Soil, Multi-File Tasks)
+
+Rencana implementasi firmware **Smart Nursery** modular berbasis **1 Board ESP32-S3** dengan **3 Pin Kelembaban Tanah (3 Zona)** dan pemisahan arsitektur FreeRTOS Tasks ke dalam file header (`.h`) dan source (`.cpp`) terpisah.
+
+---
+
+## 1. Penjelasan: Perbedaan `task.h` dan `task.cpp`
+
+Dalam pemrograman C++ modular (khususnya FreeRTOS & Arduino):
+
+* **File Header (`.h` / `sensor_task.h`)**:
+  * Berfungsi sebagai **kontrak / interface / deklarasi**.
+  * Berisi deklarasi prototipe fungsi task (contoh: `void SensorTask(void *pvParameters);`), deklarasi handle task (`extern TaskHandle_t sensorTaskHandle;`), dan konstanta yang perlu diketahui oleh file lain (misalnya `main.cpp`).
+  * File `.h` yang di-`#include` di `main.cpp` sehingga `main.cpp` tahu fungsi apa yang tersedia tanpa perlu membaca ribuan baris kode implementasi.
+* **File Source (`.cpp` / `sensor_task.cpp`)**:
+  * Berfungsi sebagai **implementasi / badan kode sesungguhnya**.
+  * Berisi logika loop FreeRTOS (`for(;;)` atau `while(1)`), rumus matematika/regresi ADC, pembacaan hardware, pembuatan JSON, dll.
+  * Memisahkan `.h` dan `.cpp` mencegah terjadinya error **"multiple definition of ..."** saat beberapa file saling memanggil variabel/fungsi yang sama.
+
+---
+
+## 2. Ringkasan & Spesifikasi Sistem
+
+1. **Hardware & Board**:
+   * **1 Board ESP32-S3 DevKitC-1** (Flash 16MB + Octal PSRAM 8MB).
+   * Tetap menggunakan target environment `[env:esp32-s3-devkitc-1]` agar sesuai dengan folder build `.pio/build/esp32-s3-devkitc-1`.
+2. **Zona & Pinout (3 Zona)**:
+   * **3 Sensor Soil Moisture** pada ADC1: GPIO 1 (Zona 1), GPIO 2 (Zona 2), GPIO 3 (Zona 3).
+   * **3 Relay Solenoid Zona**: GPIO 15 (Zona 1), GPIO 18 (Zona 2), GPIO 14 (Zona 3).
+   * **1 Relay Pompa Utama**: GPIO 13 (Active LOW).
+   * **1 DHT22 (Suhu & Kelembaban Udara)**: GPIO 4.
+   * **BH1750 (Lux) & DS3231 RTC**: I2C GPIO 8 (SDA) & GPIO 9 (SCL).
+3. **Fungsi & Logika (Preservasi 100% dari `aksespoin.cpp` / `coba_fuzzy_V2_TestMemory`)**:
+   * Algoritma **Fuzzy Mamdani / Centroid** (evaluasi 0 s.d 222 detik).
+   * Regresi linear ADC Soil Moisture ke persentase 0-100%.
+   * **Local Web Server** (Access Point UI, status live, config, logs, manual override, schedules).
+   * **Cloud Synchronization (Laravel REST API)**: Telemetry berkala (`/api/v1/telemetry`), penerimaan command Web, dan **Offline Buffer SPIFFS/LittleFS** jika Wi-Fi terputus.
+   * **RTC DS3231 Cron Scheduling** & Cooldown Timer per zona.
+   * **Memory & FreeRTOS Stack Monitor** setiap 2 detik.
+
+---
+
+## 3. Struktur File Modular
+
+```text
+c:\FIRMWARE_TA/
+├── include/
+│   ├── config.h               # Pinout 3 zona, Wi-Fi credentials, endpoint URL, macro
+│   ├── types.h                # Definisi struct Zona, Schedule, LogEntry, SystemMode
+│   ├── fuzzy_logic.h          # Deklarasi fungsi membership & prosesFuzzyMamdani()
+│   ├── storage_manager.h      # Deklarasi fungsi SPIFFS (logs, offline queue, schedule)
+│   ├── shared_state.h         # Deklarasi variabel global & semaphore (extern)
+│   └── tasks/
+│       ├── sensor_task.h      # Deklarasi SensorTask
+│       ├── fuzzy_task.h       # Deklarasi FuzzyTask
+│       ├── irrigation_task.h  # Deklarasi IrrigationTask (3 zona)
+│       ├── manual_task.h      # Deklarasi ManualControlTask
+│       ├── schedule_task.h    # Deklarasi ScheduleTask
+│       ├── web_task.h         # Deklarasi WebTask & WebServer Handlers
+│       ├── cloud_task.h       # Deklarasi CloudSyncTask & Offline Sync
+│       └── memory_task.h      # Deklarasi MemoryTask
+├── src/
+│   ├── shared_state.cpp       # Definisi variabel global, mutex, semaphore, & objek sensor
+│   ├── fuzzy_logic.cpp        # Implementasi kurva membership & Centroid Defuzzification
+│   ├── storage_manager.cpp    # Implementasi SPIFFS save/load log, schedule, & queue
+│   ├── tasks/
+│   │   ├── sensor_task.cpp    # Pembacaan 3x ADC Soil, DHT22, BH1750, RTC
+│   │   ├── fuzzy_task.cpp     # Perhitungan durasi fuzzy 3 zona
+│   │   ├── irrigation_task.cpp# Kontrol relay 3 zona + relay pompa utama
+│   │   ├── manual_task.cpp    # Timer auto-off untuk manual mode
+│   │   ├── schedule_task.cpp  # Trigger penyiraman berdasarkan RTC DS3231
+│   │   ├── web_task.cpp       # WebServer lokal (AP 192.168.4.1) & HTML/JSON API
+│   │   ├── cloud_task.cpp     # POST Telemetry ke Laravel & Batch Flush Offline Buffer
+│   │   └── memory_task.cpp    # Monitoring Free Heap, PSRAM, dan Stack Watermark
+│   └── main.cpp               # Setup hardware, inisialisasi SPIFFS/WiFi, & spawn FreeRTOS tasks
+└── platformio.ini             # Konfigurasi board esp32-s3-devkitc-1
+```
+
+---
+
+## 4. Manajemen Memori & FreeRTOS Stack Sizing
+
+> [!IMPORTANT]
+> **Prioritas Stabilitas Pengiriman Data Cloud & FreeRTOS:**
+> Saat melakukan request HTTP Client dan serialisasi JSON besar (`ArduinoJson`), memori stack dan heap berisiko tinggi terjadi *Stack Overflow* atau *Heap Fragmentation* jika ukuran stack terlalu sempit.
+
+### 4.1. Ukuran Stack Task yang Dioptimalkan
+
+| Task | Core | Prioritas | Stack Size | Alasan & Catatan |
+| :--- | :---: | :---: | :---: | :--- |
+| **CloudSyncTask** | Core 0 | 2 | **14336 Byte (14 KB)** | Menangani koneksi HTTPClient, TLS/TCP socket, dan payload JSON batch offline. |
+| **WebTask** | Core 0 | 2 | **8192 Byte (8 KB)** | Menangani HTTP Server request parsing dan JSON response live. |
+| **SensorTask** | Core 1 | 5 | **4096 Byte (4 KB)** | Pembacaan ADC, I2C BH1750/RTC, dan DHT22. |
+| **FuzzyTask** | Core 1 | 4 | **4096 Byte (4 KB)** | Perhitungan loop Centroid 0-222 detik untuk 3 zona. |
+| **IrrigationTask (x3)**| Core 1 | 3 | **3072 Byte (3 KB)** / zona | Menangani relay digital write & timer non-blocking delay. |
+| **ScheduleTask** | Core 1 | 1 | **4096 Byte (4 KB)** | Membaca RTC DS3231 dan membandingkan menit jadwal. |
+| **ManualControlTask**| Core 1 | 1 | **3072 Byte (3 KB)** | Timer countdown manual override. |
+| **MemoryTask** | Core 0 | 1 | **2048 Byte (2 KB)** | Memantau `ESP.getFreeHeap()` dan `uxTaskGetStackHighWaterMark()`. |
+
+### 4.2. Penggunaan PSRAM & Dynamic Heap
+* Flag `-DBOARD_HAS_PSRAM` diaktifkan.
+* Buffer log (`logBuffer`) dialokasikan secara dinamis di Heap (`new LogEntry[MAX_LOG_ENTRIES]`) saat `setup()`, bukan di DRAM statis BSS, sehingga RAM internal ESP32 tetap lapang untuk networking Wi-Fi.
+
+---
+
+## 5. Konfigurasi `platformio.ini`
+
+Tetap mempertahankan environment `[env:esp32-s3-devkitc-1]` yang sudah ada:
+
+```ini
+[env:esp32-s3-devkitc-1]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+
+monitor_speed = 115200
+upload_speed = 921600
+
+board_upload.flash_size = 16MB
+board_upload.maximum_size = 16777216
+board_build.arduino.memory_type = qio_opi
+board_build.flash_mode = qio
+board_build.psram_type = opi
+
+build_flags = 
+    -DBOARD_HAS_PSRAM
+    -DARDUINO_USB_MODE=1
+    -DARDUINO_USB_CDC_ON_BOOT=1
+
+upload_port = COM7
+monitor_port = COM7 
+
+lib_deps = 
+    claws/BH1750 @ ^1.3.0
+    adafruit/DHT sensor library @ ^1.4.6
+    adafruit/Adafruit Unified Sensor @ ^1.1.15
+    bblanchon/ArduinoJson
+    adafruit/RTClib @ ^2.1.1
+    adafruit/Adafruit BusIO
+```
+
+---
+
+## 6. Langkah Eksekusi
+
+1. **Membuat File Konfigurasi & State**:
+   * `include/config.h`: Konstanta 3 pin soil, 3 relay, WiFi SSID, Cloud URL.
+   * `include/types.h`: Definisi struktur data 3 zona.
+   * `include/shared_state.h` & `src/shared_state.cpp`: Variabel bersama (sensor, mutex, zona).
+2. **Membuat Modul Logika & Storage**:
+   * `include/fuzzy_logic.h` & `src/fuzzy_logic.cpp`: Logika Mamdani Centroid.
+   * `include/storage_manager.h` & `src/storage_manager.cpp`: Manajemen SPIFFS (log, offline queue, schedule).
+3. **Membuat File Masing-Masing Task**:
+   * `include/tasks/*.h` dan `src/tasks/*.cpp` untuk 8 task FreeRTOS.
+4. **Membuat `src/main.cpp`**:
+   * Menghubungkan seluruh modul, melakukan inisialisasi hardware, dan meluncurkan semua task.
+5. **Verifikasi Build**:
+   * Menjalankan build PlatformIO (`pio run`) untuk memverifikasi tidak ada error kompilasi atau link error.

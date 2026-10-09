@@ -1,0 +1,51 @@
+#include <Arduino.h>
+#include <LittleFS.h>
+#include <WebServer.h>
+#include <WiFi.h>
+
+WebServer server(80);
+
+void setup() {
+  Serial.begin(115200);
+
+  // Mount LittleFS
+  if (!LittleFS.begin(true)) {
+    Serial.println("Gagal mounting LittleFS!");
+    return;
+  }
+  Serial.println("LittleFS berhasil di-mount.");
+
+  // Setup AP atau Wi-Fi Station
+  WiFi.softAP("SmartNursery-TelU", "admin1234");
+  Serial.print("IP WebServer: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Endpoint untuk mengirim index.html saat membuka "/"
+  server.on("/", []() {
+    if (LittleFS.exists("/index.html")) {
+      File file = LittleFS.open("/index.html", "r");
+      server.streamFile(file, "text/html");
+      file.close();
+    } else {
+      server.send(404, "text/plain", "index.html tidak ditemukan");
+    }
+  });
+
+  // Endpoint untuk mengirim style.css
+  server.on("/style.css", []() {
+    if (LittleFS.exists("/style.css")) {
+      File file = LittleFS.open("/style.css", "r");
+      server.streamFile(file, "text/css");
+      file.close();
+    } else {
+      server.send(404, "text/plain", "style.css tidak ditemukan");
+    }
+  });
+
+  // Atau alternatif paling praktis melayani seluruh isi LittleFS:
+  // server.serveStatic("/", LittleFS, "/");
+
+  server.begin();
+}
+
+void loop() { server.handleClient(); }
